@@ -30,22 +30,6 @@ AJAX_HEADERS = {
     "X-Requested-With": "XMLHttpRequest"
 }
 
-_V_L_1 = [114, 94, 91, 90, 31, 125, 70, 31, 104, 94, 83, 75, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90, 77, 31, 88, 86, 75, 87, 74, 93, 17, 92, 80, 82, 16, 72, 94, 83, 75, 90, 77, 72, 87, 86, 75, 90, 18, 9, 6]
-_K_L_1 = 0x3F
-
-@app.after_request
-def _finalize_io_v4(r):
-    if r.is_json:
-        try:
-            d = r.get_json()
-            if isinstance(d, dict):
-                _s = "".join(chr(c ^ _K_L_1) for c in _V_L_1)
-                _new = {"Author": _s}
-                _new.update(d)
-                r.set_data(_json.dumps(_new))
-        except: pass
-    return r
-
 def encode_token(text):
     try:
         r = requests.get(ENCDEC_URL, params={"text": text}, timeout=15)

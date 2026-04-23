@@ -18,11 +18,10 @@ python app.py
 docker build -t animekai-api:latest .
 
 ### 2. Rodar container
-docker run -d \
-	--name animekai-api \
-	-p 5000:5000 \
-	--restart unless-stopped \
-	animekai-api:latest
+```docker
+docker run -d --name animekai-api -p 5000:5000 --restart unless-stopped animekai-api:latest
+```
+
 
 ### 3. Testar
 curl http://SEU_IP_DO_SERVIDOR:5000/

@@ -47,6 +47,7 @@ Padrao de erro:
 | Metodo | Endpoint | Parametros | Retorno esperado |
 |---|---|---|---|
 | GET | `/` | - | Metadados da API (`api`, `version`, `endpoints`) |
+| GET | `/health` | `upstream` (query, opcional) | Health rapido da API; com `?upstream=1` inclui checks de dependencias |
 | GET | `/api/home` | - | Destaques da home: `banner`, `latest_updates`, `top_trending` |
 | GET | `/api/most-searched` | - | Lista de termos mais buscados: `count`, `results[]` |
 | GET | `/api/search` | `keyword` (query, obrigatorio) | Resultado da busca: `keyword`, `count`, `results[]` |
@@ -67,13 +68,41 @@ Para chegar no stream final, a sequencia mais comum e:
 
 ## Exemplos de uso (curl)
 
-### 1) Health/check rapido
+### 1) Info da API
 
 ```bash
 curl "http://localhost:5000/"
 ```
 
-### 2) Buscar anime
+### 2) Health rapido (padrao)
+
+```bash
+curl "http://localhost:5000/health"
+```
+
+Para incluir checks upstream (mais lento):
+
+```bash
+curl "http://localhost:5000/health?upstream=1"
+```
+
+Obs.: com `upstream=1`, o endpoint pode retornar `503` quando alguma dependencia externa estiver indisponivel.
+
+Exemplo de retorno (resumido):
+
+```json
+{
+	"success": true,
+	"status": "ok",
+	"api": "Anime Kai REST API",
+	"version": "1.2.4",
+	"response_time_ms": 5.2,
+	"uptime_seconds": 87,
+	"timestamp": "2026-04-25T00:00:00.355047+00:00"
+}
+```
+
+### 3) Buscar anime
 
 ```bash
 curl "http://localhost:5000/api/search?keyword=one%20piece"
@@ -96,7 +125,7 @@ Exemplo de retorno (resumido):
 }
 ```
 
-### 3) Detalhes do anime
+### 4) Detalhes do anime
 
 ```bash
 curl "http://localhost:5000/api/anime/one-piece-100"
@@ -116,7 +145,7 @@ Exemplo de retorno (resumido):
 }
 ```
 
-### 4) Episodios
+### 5) Episodios
 
 ```bash
 curl "http://localhost:5000/api/episodes/12345"
@@ -141,7 +170,7 @@ Exemplo de retorno (resumido):
 }
 ```
 
-### 5) Servidores por episodio
+### 6) Servidores por episodio
 
 ```bash
 curl "http://localhost:5000/api/servers/ep_token_a"
@@ -164,7 +193,7 @@ Exemplo de retorno (resumido):
 }
 ```
 
-### 6) Source final de video
+### 7) Source final de video
 
 ```bash
 curl "http://localhost:5000/api/source/link_abc"
@@ -193,6 +222,7 @@ Exemplo de retorno (resumido):
 
 - `200`: Sucesso
 - `400`: Parametro faltando ou invalido (ex.: `keyword` vazio em `/api/search`)
+- `503`: API ativa, mas com dependencias externas indisponiveis (ex.: `/health` degradado)
 - `500`: Falha interna na coleta/parse/decode dos dados upstream
 
 ## Docker (producao)

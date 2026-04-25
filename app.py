@@ -3,9 +3,15 @@ from flask_cors import CORS
 import requests
 from bs4 import BeautifulSoup
 import json as _json
+from datetime import datetime, timezone
+import time
 
 app = Flask(__name__)
 CORS(app)
+
+API_NAME = "Anime Kai REST API"
+API_VERSION = "1.2.4"
+APP_STARTED_AT = time.time()
 
 ANIMEKAI_URL = "https://anikai.to/"
 ANIMEKAI_HOME_URL = "https://anikai.to/home"
@@ -29,6 +35,36 @@ AJAX_HEADERS = {
     **HEADERS,
     "X-Requested-With": "XMLHttpRequest"
 }
+
+def check_upstream_service(name, url, method="GET", accept_4xx=False, treat_expected_error_as_up=None, **request_kwargs):
+    started_at = time.perf_counter()
+    try:
+        timeout = request_kwargs.pop("timeout", 10)
+        response = requests.request(method, url, timeout=timeout, **request_kwargs)
+        elapsed_ms = round((time.perf_counter() - started_at) * 1000, 2)
+        healthy = (200 <= response.status_code < 400) or (accept_4xx and 400 <= response.status_code < 500)
+        details = {
+            "name": name,
+            "status": "up" if healthy else "down",
+            "http_status": response.status_code,
+            "response_time_ms": elapsed_ms,
+        }
+
+        if not healthy and treat_expected_error_as_up:
+            body_text = response.text or ""
+            if treat_expected_error_as_up in body_text:
+                details["status"] = "up"
+                details["note"] = "reachable_but_payload_invalid"
+
+        return details
+    except Exception as e:
+        elapsed_ms = round((time.perf_counter() - started_at) * 1000, 2)
+        return {
+            "name": name,
+            "status": "down",
+            "response_time_ms": elapsed_ms,
+            "error": str(e),
+        }
 
 def encode_token(text):
     try:
@@ -404,9 +440,10 @@ def resolve_source(link_id):
 def index():
     return jsonify({
         "success": True,
-        "api": "Anime Kai REST API",
-        "version": "1.1.0",
+        "api": API_NAME,
+        "version": API_VERSION,
         "endpoints": {
+            "/health": "Quick API health (use ?upstream=1 for dependency checks)",
             "/api/home": "Get banner, latest updates, and trending",
             "/api/most-searched": "Get most-searched anime keywords",
             "/api/search?keyword=...": "Search anime",
@@ -416,6 +453,52 @@ def index():
             "/api/source/<link_id>": "Get direct m3u8 stream and skip times"
         }
     })
+
+@app.route("/health", methods=["GET"])
+def health():
+    started_at = time.perf_counter()
+
+    include_upstream = request.args.get("upstream", "0").strip().lower() in {"1", "true", "yes"}
+    dependency_checks = {
+        "api_process": {
+            "name": "api_process",
+            "status": "up",
+            "note": "Flask process is running",
+        }
+    }
+
+    if include_upstream:
+        dependency_checks.update({
+            "animekai_home": check_upstream_service(
+                name="animekai_home",
+                url=ANIMEKAI_HOME_URL,
+                headers=HEADERS,
+                timeout=2,
+            ),
+            "encdec_enc_kai": check_upstream_service(
+                name="encdec_enc_kai",
+                url=ENCDEC_URL,
+                params={"text": "health"},
+                timeout=2,
+            ),
+        })
+
+    total_services = len(dependency_checks)
+    up_services = sum(1 for check in dependency_checks.values() if check.get("status") == "up")
+    overall_status = "ok" if up_services == total_services else "degraded"
+    status_code = 200 if overall_status == "ok" else 503
+    uptime_seconds = max(0, int(time.time() - APP_STARTED_AT))
+    health_response_time_ms = round((time.perf_counter() - started_at) * 1000, 2)
+
+    return jsonify({
+        "success": overall_status == "ok",
+        "status": overall_status,
+        "api": API_NAME,
+        "version": API_VERSION,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "uptime_seconds": uptime_seconds,
+        "response_time_ms": health_response_time_ms,
+    }), status_code
 
 @app.route("/api/most-searched", methods=["GET"])
 def api_most_searched():

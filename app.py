@@ -112,6 +112,14 @@ def parse_info_spans(info_el):
                 anime_type = span.get_text(strip=True)
     return sub_eps, dub_eps, anime_type
 
+def maybe_error_response(res):
+    if isinstance(res, tuple) and len(res) == 2:
+        payload, status = res
+        return jsonify(payload), status
+    if isinstance(res, dict) and "error" in res:
+        return jsonify(res), 500
+    return None
+
 def scrape_most_searched():
     try:
         response = requests.get(ANIMEKAI_URL, headers=HEADERS, timeout=15)
@@ -503,39 +511,60 @@ def health():
 @app.route("/api/most-searched", methods=["GET"])
 def api_most_searched():
     res = scrape_most_searched()
-    return (jsonify(res), 500) if isinstance(res, dict) and "error" in res else jsonify({"success": True, "count": len(res), "results": res})
+    err = maybe_error_response(res)
+    if err:
+        return err
+    return jsonify({"success": True, "count": len(res), "results": res})
 
 @app.route("/api/search", methods=["GET"])
 def api_search():
     kw = request.args.get("keyword", "").strip()
     if not kw: return jsonify({"error": "Keyword is required"}), 400
     res = search_anime(kw)
-    return (jsonify(res), 500) if isinstance(res, dict) and "error" in res else jsonify({"success": True, "keyword": kw, "count": len(res), "results": res})
+    err = maybe_error_response(res)
+    if err:
+        return err
+    return jsonify({"success": True, "keyword": kw, "count": len(res), "results": res})
 
 @app.route("/api/home", methods=["GET"])
 def api_home():
     res = scrape_home()
-    return (jsonify(res), 500) if isinstance(res, dict) and "error" in res else jsonify({"success": True, **res})
+    err = maybe_error_response(res)
+    if err:
+        return err
+    return jsonify({"success": True, **res})
 
 @app.route("/api/anime/<slug>", methods=["GET"])
 def api_anime_info(slug):
     res = scrape_anime_info(slug)
-    return (jsonify(res), 500) if "error" in res else jsonify({"success": True, **res})
+    err = maybe_error_response(res)
+    if err:
+        return err
+    return jsonify({"success": True, **res})
 
 @app.route("/api/episodes/<ani_id>", methods=["GET"])
 def api_episodes(ani_id):
     res = fetch_episodes(ani_id)
-    return (jsonify(res), 500) if isinstance(res, dict) and "error" in res else jsonify({"success": True, "ani_id": ani_id, "count": len(res), "episodes": res})
+    err = maybe_error_response(res)
+    if err:
+        return err
+    return jsonify({"success": True, "ani_id": ani_id, "count": len(res), "episodes": res})
 
 @app.route("/api/servers/<ep_token>", methods=["GET"])
 def api_servers(ep_token):
     res = fetch_servers(ep_token)
-    return (jsonify(res), 500) if "error" in res else jsonify({"success": True, **res})
+    err = maybe_error_response(res)
+    if err:
+        return err
+    return jsonify({"success": True, **res})
 
 @app.route("/api/source/<link_id>", methods=["GET"])
 def api_source(link_id):
     res = resolve_source(link_id)
-    return (jsonify(res), 500) if "error" in res else jsonify({"success": True, **res})
+    err = maybe_error_response(res)
+    if err:
+        return err
+    return jsonify({"success": True, **res})
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)

@@ -21,6 +21,7 @@ docker rm animekai-api 2>/dev/null || true
 echo "▶️ Subindo novo container..."
 docker run -d \
   --name animekai-api \
+  -p 127.0.0.1:5000:5000 \
   --restart unless-stopped \
   animekai-api:latest
 

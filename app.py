@@ -5,12 +5,23 @@ from bs4 import BeautifulSoup
 import json as _json
 from datetime import datetime, timezone
 import time
+import logging
+import os
+
+DEBUG_MODE = os.getenv("API_DEBUG", "0").strip().lower() in {"1", "true", "yes"}
+
+logging.basicConfig(
+    level=logging.DEBUG if DEBUG_MODE else logging.WARNING,
+    format="%(asctime)s [%(levelname)s] %(funcName)s: %(message)s",
+)
+log = logging.getLogger(__name__)
+# ──────────────────────────────────────────────────────────────────────────────
 
 app = Flask(__name__)
 CORS(app)
 
 API_NAME = "Anime Kai REST API"
-API_VERSION = "1.2.4"
+API_VERSION = "1.2.5"
 APP_STARTED_AT = time.time()
 
 ANIMEKAI_URL = "https://anikai.to/"
@@ -72,7 +83,8 @@ def encode_token(text):
         r.raise_for_status()
         data = r.json()
         return data.get("result") if data.get("status") == 200 else None
-    except Exception:
+    except Exception as e:
+        log.error("encode_token falhou: %s", e)
         return None
 
 def decode_kai(text):
@@ -80,8 +92,10 @@ def decode_kai(text):
         r = requests.post(ENCDEC_DEC_KAI, json={"text": text}, timeout=15)
         r.raise_for_status()
         data = r.json()
+        log.debug("decode_kai response: %s", data)
         return data.get("result") if data.get("status") == 200 else None
-    except Exception:
+    except Exception as e:
+        log.error("decode_kai falhou: %s", e)
         return None
 
 def decode_mega(text):
@@ -92,8 +106,10 @@ def decode_mega(text):
         }, timeout=15)
         r.raise_for_status()
         data = r.json()
+        log.debug("decode_mega response: %s", data)
         return data.get("result") if data.get("status") == 200 else None
-    except Exception:
+    except Exception as e:
+        log.error("decode_mega falhou: %s", e)
         return None
 
 def parse_info_spans(info_el):
@@ -412,36 +428,82 @@ def fetch_servers(ep_token):
         return {"error": str(e)}, 500
 
 def resolve_source(link_id):
+    """
+    Fluxo:
+      1. encode_token(link_id)          → token para assinar a request
+      2. GET links/view                 → encrypted_result
+      3. decode_kai(encrypted_result)   → embed_url + skip times  ← mínimo necessário
+      4. GET <embed>/media/<video_id>   → encrypted_media          (opcional)
+      5. decode_mega(encrypted_media)   → sources + tracks         (opcional)
+
+    Se o passo 3 funcionar, a resposta sempre carrega embed_url e skip,
+    mesmo que os passos 4-5 falhem ou deem timeout.
+    """
     try:
         encoded = encode_token(link_id)
-        if not encoded: return {"error": "Token encryption failed"}, 500
+        if not encoded:
+            return {"error": "Token encryption failed"}, 500
 
-        resp = requests.get(ANIMEKAI_LINKS_VIEW_URL, params={"id": link_id, "_": encoded}, headers=AJAX_HEADERS, timeout=15)
+        resp = requests.get(
+            ANIMEKAI_LINKS_VIEW_URL,
+            params={"id": link_id, "_": encoded},
+            headers=AJAX_HEADERS,
+            timeout=15,
+        )
         resp.raise_for_status()
         encrypted_result = resp.json().get("result", "")
-        
+        log.debug("encrypted_result preview: %s", str(encrypted_result)[:120])
+
+        if not encrypted_result:
+            return {"error": "Empty result from animekai"}, 500
+
         embed_data = decode_kai(encrypted_result)
-        if not embed_data: return {"error": "Embed decryption failed"}, 500
+        if not embed_data:
+            return {"error": "Embed decryption failed"}, 500
+
         embed_url = embed_data.get("url", "")
-        if not embed_url: return {"error": "No embed URL found"}, 500
+        skip      = embed_data.get("skip", {})
 
-        video_id = embed_url.rstrip("/").split("/")[-1]
-        embed_base = embed_url.rsplit("/e/", 1)[0] if "/e/" in embed_url else embed_url.rsplit("/", 1)[0]
-        media_resp = requests.get(f"{embed_base}/media/{video_id}", headers=HEADERS, timeout=15)
-        media_resp.raise_for_status()
-        encrypted_media = media_resp.json().get("result", "")
+        if not embed_url:
+            return {"error": "No embed URL found"}, 500
 
-        final_data = decode_mega(encrypted_media)
-        if not final_data: return {"error": "Media decryption failed"}, 500
+        sources  = []
+        tracks   = []
+        download = ""
+
+        try:
+            video_id   = embed_url.rstrip("/").split("/")[-1]
+            embed_base = embed_url.rsplit("/e/", 1)[0] if "/e/" in embed_url else embed_url.rsplit("/", 1)[0]
+
+            media_resp = requests.get(
+                f"{embed_base}/media/{video_id}",
+                headers=HEADERS,
+                timeout=15,
+            )
+            media_resp.raise_for_status()
+            encrypted_media = media_resp.json().get("result", "")
+
+            final_data = decode_mega(encrypted_media)
+            if final_data:
+                sources  = final_data.get("sources", [])
+                tracks   = final_data.get("tracks", [])
+                download = final_data.get("download", "")
+            else:
+                log.warning("decode_mega falhou para link_id=%s — retornando apenas embed_url", link_id)
+
+        except Exception as e:
+            log.warning("Falha ao buscar sources/tracks para link_id=%s: %s", link_id, e)
 
         return {
             "embed_url": embed_url,
-            "skip": embed_data.get("skip", {}),
-            "sources": final_data.get("sources", []),
-            "tracks": final_data.get("tracks", []),
-            "download": final_data.get("download", ""),
+            "skip":      skip,
+            "sources":   sources,
+            "tracks":    tracks,
+            "download":  download,
         }
+
     except Exception as e:
+        log.exception("resolve_source falhou para link_id=%s", link_id)
         return {"error": str(e)}, 500
 
 @app.route("/", methods=["GET"])
@@ -458,7 +520,7 @@ def index():
             "/api/anime/<slug>": "Get anime details and ani_id",
             "/api/episodes/<ani_id>": "Get episode list and ep tokens",
             "/api/servers/<ep_token>": "Get available servers for an episode",
-            "/api/source/<link_id>": "Get direct m3u8 stream and skip times"
+            "/api/source/<link_id>": "Get embed_url, skip times, and (if available) m3u8 sources",
         }
     })
 
@@ -512,8 +574,7 @@ def health():
 def api_most_searched():
     res = scrape_most_searched()
     err = maybe_error_response(res)
-    if err:
-        return err
+    if err: return err
     return jsonify({"success": True, "count": len(res), "results": res})
 
 @app.route("/api/search", methods=["GET"])
@@ -522,49 +583,89 @@ def api_search():
     if not kw: return jsonify({"error": "Keyword is required"}), 400
     res = search_anime(kw)
     err = maybe_error_response(res)
-    if err:
-        return err
+    if err: return err
     return jsonify({"success": True, "keyword": kw, "count": len(res), "results": res})
 
 @app.route("/api/home", methods=["GET"])
 def api_home():
     res = scrape_home()
     err = maybe_error_response(res)
-    if err:
-        return err
+    if err: return err
     return jsonify({"success": True, **res})
 
 @app.route("/api/anime/<slug>", methods=["GET"])
 def api_anime_info(slug):
     res = scrape_anime_info(slug)
     err = maybe_error_response(res)
-    if err:
-        return err
+    if err: return err
     return jsonify({"success": True, **res})
 
 @app.route("/api/episodes/<ani_id>", methods=["GET"])
 def api_episodes(ani_id):
     res = fetch_episodes(ani_id)
     err = maybe_error_response(res)
-    if err:
-        return err
+    if err: return err
     return jsonify({"success": True, "ani_id": ani_id, "count": len(res), "episodes": res})
 
 @app.route("/api/servers/<ep_token>", methods=["GET"])
 def api_servers(ep_token):
     res = fetch_servers(ep_token)
     err = maybe_error_response(res)
-    if err:
-        return err
+    if err: return err
     return jsonify({"success": True, **res})
 
 @app.route("/api/source/<link_id>", methods=["GET"])
 def api_source(link_id):
     res = resolve_source(link_id)
     err = maybe_error_response(res)
-    if err:
-        return err
+    if err: return err
     return jsonify({"success": True, **res})
+
+if DEBUG_MODE:
+    @app.route("/debug/source/<link_id>", methods=["GET"])
+    def debug_source(link_id):
+        """
+        Executa cada passo de resolve_source de forma isolada e retorna
+        os payloads intermediários. Disponível apenas com API_DEBUG=1.
+        """
+        steps = {}
+
+        encoded = encode_token(link_id)
+        steps["encode_token"] = {"result": encoded, "ok": bool(encoded)}
+        if not encoded:
+            return jsonify(steps)
+
+        resp = requests.get(
+            ANIMEKAI_LINKS_VIEW_URL,
+            params={"id": link_id, "_": encoded},
+            headers=AJAX_HEADERS,
+            timeout=15,
+        )
+        encrypted_result = resp.json().get("result", "") if resp.ok else ""
+        steps["links_view"] = {
+            "status_code": resp.status_code,
+            "body_preview": resp.text[:500],
+        }
+        steps["encrypted_result_preview"] = str(encrypted_result)[:200]
+
+        if encrypted_result:
+            r = requests.post(ENCDEC_DEC_KAI, json={"text": encrypted_result}, timeout=15)
+            steps["decode_kai"] = {"status_code": r.status_code, "body": r.json()}
+
+            embed_data = r.json().get("result") if r.ok and r.json().get("status") == 200 else None
+            if embed_data and embed_data.get("url"):
+                embed_url  = embed_data["url"]
+                video_id   = embed_url.rstrip("/").split("/")[-1]
+                embed_base = embed_url.rsplit("/e/", 1)[0] if "/e/" in embed_url else embed_url.rsplit("/", 1)[0]
+                m = requests.get(f"{embed_base}/media/{video_id}", headers=HEADERS, timeout=15)
+                steps["media_fetch"] = {"status_code": m.status_code, "body_preview": m.text[:300]}
+
+                if m.ok:
+                    enc_media = m.json().get("result", "")
+                    dm = requests.post(ENCDEC_DEC_MEGA, json={"text": enc_media, "agent": HEADERS["User-Agent"]}, timeout=15)
+                    steps["decode_mega"] = {"status_code": dm.status_code, "body": dm.json()}
+
+        return jsonify(steps)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)

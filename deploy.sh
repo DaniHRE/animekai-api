@@ -23,6 +23,7 @@ docker run -d \
   --name animekai-api \
   -p 127.0.0.1:5000:5000 \
   --restart unless-stopped \
+  -e API_DEBUG=1 \
   animekai-api:latest
 
 echo "🧹 Limpando imagens antigas..."

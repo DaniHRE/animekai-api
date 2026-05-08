@@ -3,6 +3,7 @@ from flask_cors import CORS
 import requests
 from bs4 import BeautifulSoup
 import json as _json
+import re
 from datetime import datetime, timezone
 import time
 import logging
@@ -112,21 +113,97 @@ def decode_mega(text):
         log.error("decode_mega falhou: %s", e)
         return None
 
+def extract_count_from_span(span):
+    for key in ("data-ep", "data-episodes", "data-count", "data-num"):
+        val = span.get(key)
+        if isinstance(val, str) and val.isdigit():
+            return val
+
+    text = span.get_text(strip=True)
+    m = re.search(r"\d+", text)
+    return m.group(0) if m else ""
+
 def parse_info_spans(info_el):
     sub_eps = ""
     dub_eps = ""
     anime_type = ""
     for span in info_el.find_all("span") if info_el else []:
         cls = span.get("class", [])
-        if "sub" in cls:
-            sub_eps = span.get_text(strip=True)
-        elif "dub" in cls:
-            dub_eps = span.get_text(strip=True)
+        cls_text = " ".join(cls).lower()
+        text = span.get_text(strip=True)
+        text_lower = text.lower()
+        if "sub" in cls_text or "sub" in text_lower:
+            count = extract_count_from_span(span)
+            if count:
+                sub_eps = count
+        elif "dub" in cls_text or "dub" in text_lower:
+            count = extract_count_from_span(span)
+            if count:
+                dub_eps = count
         else:
             b_tag = span.find("b")
             if b_tag:
-                anime_type = span.get_text(strip=True)
+                anime_type = text
     return sub_eps, dub_eps, anime_type
+
+def extract_sub_dub_from_container(container):
+    sub_eps = ""
+    dub_eps = ""
+    if not container:
+        return sub_eps, dub_eps
+
+    for node in container.find_all(["span", "div"]):
+        cls = node.get("class", [])
+        cls_text = " ".join(cls).lower()
+        text = node.get_text(" ", strip=True)
+        text_lower = text.lower()
+
+        if not sub_eps and ("sub" in cls_text or "sub" in text_lower):
+            count = extract_count_from_span(node)
+            if count:
+                sub_eps = count
+
+        if not dub_eps and ("dub" in cls_text or "dub" in text_lower):
+            count = extract_count_from_span(node)
+            if count:
+                dub_eps = count
+
+        if sub_eps and dub_eps:
+            break
+
+    return sub_eps, dub_eps
+
+def extract_total_episodes(info_el, detail):
+    if isinstance(detail, dict):
+        for key in ("episodes", "episode", "eps"):
+            val = detail.get(key)
+            if isinstance(val, str):
+                m = re.search(r"\d+", val)
+                if m:
+                    return m.group(0)
+
+    if info_el:
+        for span in info_el.find_all("span"):
+            text = span.get_text(strip=True)
+            if span.find("b") and text.isdigit():
+                return text
+
+    return ""
+
+def extract_counts_from_episodes(episodes):
+    sub_count = 0
+    dub_count = 0
+    for ep in episodes:
+        if ep.get("has_sub"):
+            sub_count += 1
+        if ep.get("has_dub"):
+            dub_count += 1
+
+    return {
+        "sub": str(sub_count) if sub_count else "",
+        "dub": str(dub_count) if dub_count else "",
+        "total": str(len(episodes)) if episodes else "",
+    }
 
 def maybe_error_response(res):
     if isinstance(res, tuple) and len(res) == 2:
@@ -330,6 +407,7 @@ def scrape_anime_info(slug):
 
         info_el = soup.select_one(".main-entity .info")
         sub, dub, atype = parse_info_spans(info_el)
+
         
         detail = {}
         for div in soup.select(".detail > div > div"):
@@ -339,6 +417,26 @@ def scrape_anime_info(slug):
                 k = k.strip().lower().replace(" ", "_").replace(":", "")
                 links = div.select("span a")
                 detail[k] = [a.get_text(strip=True) for a in links] if links else v.strip().strip("|")
+
+        if not sub or not dub:
+            main_entity = soup.select_one(".main-entity")
+            fallback_sub, fallback_dub = extract_sub_dub_from_container(main_entity)
+            sub = sub or fallback_sub
+            dub = dub or fallback_dub
+
+        total_episodes = extract_total_episodes(info_el, detail)
+
+        if (not sub or not dub or not total_episodes) and ani_id:
+            episodes_res = fetch_episodes(ani_id)
+            if isinstance(episodes_res, list):
+                counts = extract_counts_from_episodes(episodes_res)
+                sub = sub or counts["sub"]
+                dub = dub or counts["dub"]
+                if not total_episodes:
+                    total_episodes = counts["total"]
+
+        if total_episodes:
+            detail["episodes"] = total_episodes
 
         seasons = []
         for s in soup.select(".swiper-wrapper.season .aitem"):
@@ -364,6 +462,7 @@ def scrape_anime_info(slug):
             "banner": banner,
             "sub_episodes": sub,
             "dub_episodes": dub,
+            "total_episodes": total_episodes,
             "type": atype,
             "rating": info_el.select_one(".rating").get_text(strip=True) if info_el and info_el.select_one(".rating") else "",
             "mal_score": soup.select_one(".rate-box .value").get_text(strip=True) if soup.select_one(".rate-box .value") else "",
@@ -384,8 +483,9 @@ def fetch_episodes(ani_id):
         if not html: return []
 
         soup = BeautifulSoup(html, "html.parser")
+        ep_nodes = soup.select(".eplist a")
         episodes = []
-        for ep in soup.select(".eplist a"):
+        for ep in ep_nodes:
             langs = ep.get("langs", "0")
             episodes.append({
                 "number": ep.get("num", ""),
